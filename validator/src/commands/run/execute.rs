@@ -138,7 +138,8 @@ pub fn execute(
             Some(logfile)
         }
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // FIREDANCER: Redirect logging to Firedancer
     // let _logger_thread = redirect_stderr_to_file(logfile);
     let _ = redirect_stderr_to_file; // Silence unused warning
@@ -850,6 +851,16 @@ pub fn execute(
         wen_restart_coordinator: value_t!(matches, "wen_restart_coordinator", Pubkey).ok(),
         retransmit_xdp,
         use_tpu_client_next: !matches.is_present("use_connection_cache"),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+
         ..ValidatorConfig::default()
     };
 

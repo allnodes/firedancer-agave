@@ -159,6 +159,11 @@ members = [
     "zk-keygen",
     "zk-sdk",
     "zk-token-sdk",
+
+    # Allnodes
+    "allnodes/client",
+    "allnodes/solana",
+    "allnodes/protos/allnodes-service-protos",
 ]
 
 exclude = ["programs/sbf", "svm/examples", "svm/tests/example-programs"]
@@ -191,6 +196,12 @@ manual_let_else = "deny"
 used_underscore_binding = "deny"
 
 [workspace.dependencies]
+# Allnodes
+allnodes-client = { path = "allnodes/client" }
+allnodes-service-protos = { path = "allnodes/protos/allnodes-service-protos" }
+allnodes-solana = { path = "allnodes/solana" }
+lazy_static = "1.5.0"
+
 Inflector = "0.11.4"
 axum = "0.7.9"
 aya = "0.13"
@@ -645,6 +656,12 @@ opt-level = 3
 [patch.crates-io]
 # for details, see https://github.com/anza-xyz/crossbeam/commit/fd279d707025f0e60951e429bf778b4813d1b6bf
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }
+
+# Allnodes sdk customizations
+solana-file-download = { path = "sdk/file-download" }
+solana-logger = { path = "sdk/logger" }
+solana-sha256-hasher = { path = "sdk/sha256-hasher" }
+solana-vote-interface = { path = "sdk/vote-interface" }
 
 # We include the following crates as our dependencies above from crates.io:
 #

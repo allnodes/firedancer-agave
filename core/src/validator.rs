@@ -292,6 +292,10 @@ pub struct ValidatorConfig {
     pub delay_leader_block_for_pending_fork: bool,
     pub use_tpu_client_next: bool,
     pub retransmit_xdp: Option<XdpConfig>,
+
+    // Allnodes configuration
+    pub use_mostly_confirmed_threshold: bool,
+    pub mostly_confirmed_threshold_config_path: Option<PathBuf>,
 }
 
 impl Default for ValidatorConfig {
@@ -367,6 +371,10 @@ impl Default for ValidatorConfig {
             delay_leader_block_for_pending_fork: false,
             use_tpu_client_next: true,
             retransmit_xdp: None,
+
+            // Allnodes configuration
+            use_mostly_confirmed_threshold: true,
+            mostly_confirmed_threshold_config_path: None,
         }
     }
 }
@@ -467,7 +475,7 @@ impl Drop for VSPRwLockWriteGuard<'_> {
             }
             ValidatorStartProgress::Running => memory[0] = 11,
         }
-        
+
         extern "C" {
             fn fd_ext_plugin_publish_start_progress(kind: u8, data: *const u8, len: u64);
         }
@@ -1907,6 +1915,13 @@ impl Validator {
                 None
             };
 
+        let voting_patch = crate::allnodes::VotingPatch::init(
+            config.use_mostly_confirmed_threshold,
+            config.mostly_confirmed_threshold_config_path.as_ref(),
+            cluster_info.my_shred_version(),
+        );
+        warn!("Voting patch initialized: {voting_patch:?}");
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1968,6 +1983,7 @@ impl Validator {
             wen_restart_repair_slots.clone(),
             slot_status_notifier,
             vote_connection_cache,
+            voting_patch,
         )
         .map_err(ValidatorError::Other)?;
 
