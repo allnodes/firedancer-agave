@@ -80,6 +80,13 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         delay_leader_block_for_pending_fork: config.delay_leader_block_for_pending_fork,
         use_tpu_client_next: config.use_tpu_client_next,
         retransmit_xdp: config.retransmit_xdp.clone(),
+
+        // Allnodes configuration
+        use_mostly_confirmed_threshold: config.use_mostly_confirmed_threshold,
+        mostly_confirmed_threshold_config_path: config
+            .mostly_confirmed_threshold_config_path
+            .clone(),
+        voting_patch_flags: config.voting_patch_flags,
     }
 }
 

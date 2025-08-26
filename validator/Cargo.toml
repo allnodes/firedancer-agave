@@ -19,6 +19,11 @@ targets = ["x86_64-unknown-linux-gnu"]
 crate-type = ["staticlib"]
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+allnodes-solana = { workspace = true }
+
 agave-geyser-plugin-interface = { workspace = true }
 chrono = { workspace = true, features = ["default", "serde"] }
 clap = { workspace = true }

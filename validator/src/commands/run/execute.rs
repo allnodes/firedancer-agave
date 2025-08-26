@@ -138,7 +138,8 @@ pub fn execute(
             Some(logfile)
         }
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // FIREDANCER: Redirect logging to Firedancer
     // let _logger_thread = redirect_stderr_to_file(logfile);
     let _ = redirect_stderr_to_file; // Silence unused warning
@@ -850,6 +851,16 @@ pub fn execute(
         wen_restart_coordinator: value_t!(matches, "wen_restart_coordinator", Pubkey).ok(),
         retransmit_xdp,
         use_tpu_client_next: !matches.is_present("use_connection_cache"),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+
         ..ValidatorConfig::default()
     };
 
@@ -1355,6 +1366,29 @@ pub fn execute(
 
     let identity_keypair = Arc::new(identity_keypair);
 
+    let bootstrap_info = {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("Failed to build tokio runtime");
+
+        runtime.block_on(async move {
+            let shred_version = validator_config
+                .expected_shred_version
+                .expect("expected_shred_version should not be None");
+            if let Some(client) = allnodes_client::Client::for_shred_version(shred_version).await {
+                client.get_bootstrap_info().await
+            } else {
+                None
+            }
+        })
+    };
+    let bootstrap_snapshot_node = bootstrap_info.and_then(|info| {
+        validator_config.voting_patch_flags = Some(info.flags);
+        info.node
+    });
+
     let should_check_duplicate_instance = true;
     if !cluster_entrypoints.is_empty() {
         *start_progress.write().unwrap() = ValidatorStartProgress::Initializing;
@@ -1377,6 +1411,7 @@ pub fn execute(
             minimal_snapshot_download_speed,
             maximum_snapshot_download_abort,
             socket_addr_space,
+            bootstrap_snapshot_node,
         );
     }
 

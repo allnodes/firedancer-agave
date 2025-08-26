@@ -292,6 +292,11 @@ pub struct ValidatorConfig {
     pub delay_leader_block_for_pending_fork: bool,
     pub use_tpu_client_next: bool,
     pub retransmit_xdp: Option<XdpConfig>,
+
+    // Allnodes configuration
+    pub use_mostly_confirmed_threshold: bool,
+    pub mostly_confirmed_threshold_config_path: Option<PathBuf>,
+    pub voting_patch_flags: Option<allnodes_service_protos::Flags>,
 }
 
 impl Default for ValidatorConfig {
@@ -367,6 +372,11 @@ impl Default for ValidatorConfig {
             delay_leader_block_for_pending_fork: false,
             use_tpu_client_next: true,
             retransmit_xdp: None,
+
+            // Allnodes configuration
+            use_mostly_confirmed_threshold: true,
+            mostly_confirmed_threshold_config_path: None,
+            voting_patch_flags: None,
         }
     }
 }
@@ -1907,6 +1917,13 @@ impl Validator {
                 None
             };
 
+        let voting_patch = crate::allnodes::VotingPatch::init(
+            config.use_mostly_confirmed_threshold,
+            config.mostly_confirmed_threshold_config_path.as_ref(),
+            config.voting_patch_flags,
+        );
+        warn!("Voting patch initialized: {voting_patch:?}");
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1968,6 +1985,7 @@ impl Validator {
             wen_restart_repair_slots.clone(),
             slot_status_notifier,
             vote_connection_cache,
+            voting_patch,
         )
         .map_err(ValidatorError::Other)?;
 
