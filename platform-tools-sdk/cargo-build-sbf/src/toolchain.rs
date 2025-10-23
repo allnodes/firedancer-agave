@@ -3,7 +3,7 @@ use {
     bzip2::bufread::BzDecoder,
     log::{debug, error, warn},
     regex::Regex,
-    solana_file_download::download_file,
+    solana_download_utils::download_file,
     std::{
         env,
         fs::{self, File},
