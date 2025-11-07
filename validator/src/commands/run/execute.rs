@@ -125,7 +125,8 @@ pub fn execute(
         println!("log file: {logfile}");
         Some(logfile)
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // FIREDANCER: Redirect logging to Firedancer
     // let _logger_thread = redirect_stderr_to_file(logfile);
     let _ = redirect_stderr_to_file; // Silence unused warning
@@ -249,22 +250,6 @@ pub fn execute(
             ledger_path.display(),
         )
     })?;
-
-    let max_ledger_shreds = if matches.is_present("limit_ledger_size") {
-        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
-            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
-            None => DEFAULT_MAX_LEDGER_SHREDS,
-        };
-        if limit_ledger_size < DEFAULT_MIN_MAX_LEDGER_SHREDS {
-            Err(format!(
-                "The provided --limit-ledger-size value was too small, the minimum value is \
-                 {DEFAULT_MIN_MAX_LEDGER_SHREDS}"
-            ))?;
-        }
-        Some(limit_ledger_size)
-    } else {
-        None
-    };
 
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
@@ -666,7 +651,7 @@ pub fn execute(
         repair_whitelist,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        max_ledger_shreds,
+        max_ledger_shreds: None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -761,6 +746,16 @@ pub fn execute(
             Arc::new(AtomicBool::new(false)),
         )]
         .into(),
+
+        // Allnodes config
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
     };
 
     let reserved = validator_config
@@ -1065,6 +1060,21 @@ pub fn execute(
             maximum_snapshot_download_abort,
             run_args.socket_addr_space,
         );
+    }
+
+    if matches.is_present("limit_ledger_size") {
+        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
+            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
+            None => *DEFAULT_MAX_LEDGER_SHREDS,
+        };
+        if limit_ledger_size < *DEFAULT_MIN_MAX_LEDGER_SHREDS {
+            Err(format!(
+                "The provided --limit-ledger-size value was too small, the minimum value is \
+                 {}",
+                *DEFAULT_MIN_MAX_LEDGER_SHREDS,
+            ))?;
+        }
+        validator_config.max_ledger_shreds = Some(limit_ledger_size);
     }
 
     if operation == Operation::Initialize {
