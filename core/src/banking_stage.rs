@@ -79,6 +79,7 @@ conditional_vis_mod!(
 );
 conditional_vis_mod!(unified_scheduler, feature = "dev-context-only-utils", pub, pub(crate));
 
+allnodes_client::constants! {
 /// The maximum number of worker threads that can be spawned by banking stage.
 /// 64 because `ThreadAwareAccountLocks` uses a `u64` as a bitmask to
 /// track thread placement.
@@ -88,6 +89,7 @@ const DEFAULT_NUM_WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 const TOTAL_BUFFERED_PACKETS: usize = 100_000;
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
+}
 
 #[derive(Debug, Default)]
 pub struct BankingStageStats {
@@ -611,11 +613,11 @@ impl BankingStage {
     }
 
     pub fn default_num_workers() -> NonZeroUsize {
-        DEFAULT_NUM_WORKERS
+        *DEFAULT_NUM_WORKERS
     }
 
     pub fn max_num_workers() -> NonZeroUsize {
-        MAX_NUM_WORKERS
+        *MAX_NUM_WORKERS
     }
 
     pub fn join(mut self) -> thread::Result<()> {
@@ -736,7 +738,7 @@ mod tests {
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
-            DEFAULT_NUM_WORKERS,
+            *DEFAULT_NUM_WORKERS,
             None,
             replay_vote_sender,
             None,
@@ -792,7 +794,7 @@ mod tests {
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
-            DEFAULT_NUM_WORKERS,
+            *DEFAULT_NUM_WORKERS,
             None,
             replay_vote_sender,
             None,
@@ -857,7 +859,7 @@ mod tests {
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
-            DEFAULT_NUM_WORKERS,
+            *DEFAULT_NUM_WORKERS,
             None,
             replay_vote_sender,
             None,
@@ -1008,7 +1010,7 @@ mod tests {
                 non_vote_receiver,
                 tpu_vote_receiver,
                 gossip_vote_receiver,
-                DEFAULT_NUM_WORKERS,
+                *DEFAULT_NUM_WORKERS,
                 None,
                 replay_vote_sender,
                 None,
@@ -1195,7 +1197,7 @@ mod tests {
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
-            DEFAULT_NUM_WORKERS,
+            *DEFAULT_NUM_WORKERS,
             None,
             replay_vote_sender,
             None,
