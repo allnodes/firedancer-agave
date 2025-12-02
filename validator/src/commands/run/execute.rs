@@ -120,12 +120,20 @@ pub fn execute(
     if let Some(logfile) = logfile.as_ref() {
         println!("log file: {}", logfile.display());
     }
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar =
+        logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // FIREDANCER: Redirect logging to Firedancer
     // let _logger_thread = redirect_stderr_to_file(logfile);
     let _ = redirect_stderr_to_file; // Silence unused warning
     extern "C" {
-        fn fd_log_private_1(level: i32, now: i64, file: *const i8, line: i32, func: *const i8, msg: *const i8);
+        fn fd_log_private_1(
+            level: i32,
+            now: i64,
+            file: *const i8,
+            line: i32,
+            func: *const i8,
+            msg: *const i8,
+        );
         fn fd_log_wallclock() -> i64;
         fn fd_log_level_logfile() -> i32;
     }
@@ -148,8 +156,8 @@ pub fn execute(
 
             let level: i32 = match record.level() {
                 log::Level::Error => 4,
-                log::Level::Warn  => 3,
-                log::Level::Info  => 1, /* Info -> DEBUG, so it doesn't spam stdout */
+                log::Level::Warn => 3,
+                log::Level::Info => 1, /* Info -> DEBUG, so it doesn't spam stdout */
                 log::Level::Debug => 1,
                 log::Level::Trace => 0,
             };
@@ -162,8 +170,10 @@ pub fn execute(
                 std::ffi::CString::new(UNKNOWN).unwrap()
             };
 
-            let msg = std::ffi::CString::new(record.args().to_string()).unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap());
-            let target = std::ffi::CString::new(record.target()).unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap());
+            let msg = std::ffi::CString::new(record.args().to_string())
+                .unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap());
+            let target = std::ffi::CString::new(record.target())
+                .unwrap_or(std::ffi::CString::new(UNKNOWN).unwrap());
 
             unsafe {
                 // We reroute log messages to the Firedancer logger.
@@ -176,7 +186,8 @@ pub fn execute(
                     file.as_ptr(),
                     record.line().unwrap_or(0) as i32,
                     target.as_ptr(),
-                    msg.as_ptr());
+                    msg.as_ptr(),
+                );
             }
         }
 
@@ -192,7 +203,9 @@ pub fn execute(
         4 => LevelFilter::Error,
         _ => LevelFilter::Off,
     };
-    log::set_logger(&LOGGER).map(|()| log::set_max_level(log_level)).unwrap();
+    log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(log_level))
+        .unwrap();
 
     info!("{} {}", crate_name!(), solana_version);
     // FIREDANCER: Dump provided arguments rather than ones from the environment
@@ -235,22 +248,6 @@ pub fn execute(
     let do_port_check = !matches.is_present("no_port_check");
 
     let ledger_path = run_args.ledger_path;
-
-    let max_ledger_shreds = if matches.is_present("limit_ledger_size") {
-        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
-            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
-            None => DEFAULT_MAX_LEDGER_SHREDS,
-        };
-        if limit_ledger_size < DEFAULT_MIN_MAX_LEDGER_SHREDS {
-            Err(format!(
-                "The provided --limit-ledger-size value was too small, the minimum value is \
-                 {DEFAULT_MIN_MAX_LEDGER_SHREDS}"
-            ))?;
-        }
-        Some(limit_ledger_size)
-    } else {
-        None
-    };
 
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
@@ -632,7 +629,7 @@ pub fn execute(
         repair_whitelist,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        max_ledger_shreds,
+        max_ledger_shreds: None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -713,6 +710,20 @@ pub fn execute(
             Arc::new(AtomicBool::new(false)),
         )]
         .into(),
+
+        // Allnodes config
+        identity_path: match matches.value_of("identity") {
+            None | Some("ASK") => None,
+            Some(path) => PathBuf::from_str(path).ok(),
+        },
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
     };
 
     let reserved = validator_config
@@ -938,7 +949,7 @@ pub fn execute(
     // FIREDANCER: Send shred version that we retrieved from the command line or the entrypoint above to Firedancer
     if let Some(shred_version) = expected_shred_version {
         extern "C" {
-            fn fd_ext_shred_set_shred_version( shred_version: u64 );
+            fn fd_ext_shred_set_shred_version(shred_version: u64);
         }
         unsafe { fd_ext_shred_set_shred_version(shred_version as u64) };
     }
@@ -1028,6 +1039,21 @@ pub fn execute(
             maximum_snapshot_download_abort,
             run_args.socket_addr_space,
         );
+    }
+
+    if matches.is_present("limit_ledger_size") {
+        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
+            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
+            None => *DEFAULT_MAX_LEDGER_SHREDS,
+        };
+        if limit_ledger_size < *DEFAULT_MIN_MAX_LEDGER_SHREDS {
+            Err(format!(
+                "The provided --limit-ledger-size value was too small, the minimum value is \
+                 {}",
+                *DEFAULT_MIN_MAX_LEDGER_SHREDS,
+            ))?;
+        }
+        validator_config.max_ledger_shreds = Some(limit_ledger_size);
     }
 
     if operation == Operation::Initialize {

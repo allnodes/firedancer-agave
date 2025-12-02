@@ -23,6 +23,11 @@ agave-unstable-api = []
 crate-type = ["staticlib"]
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+allnodes-solana = { workspace = true }
+
 agave-geyser-plugin-interface = { workspace = true }
 agave-logger = { workspace = true }
 agave-snapshots = { workspace = true }
