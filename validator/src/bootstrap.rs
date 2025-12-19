@@ -548,6 +548,38 @@ fn get_vetted_rpc_nodes(
     }
 }
 
+fn allnodes_push_rpc_node_to_vetted(
+    node: allnodes_service_protos::BootstrapSnapshotNode,
+    shred_version: u16,
+    rpc_bootstrap_config: &RpcBootstrapConfig,
+    vetted_rpc_nodes: &mut Vec<(ContactInfo, Option<SnapshotHash>, RpcClient)>,
+    blacklisted_rpc_nodes: &HashSet<Pubkey>,
+) {
+    if blacklisted_rpc_nodes.contains(&node.pubkey) {
+        warn!(
+            "Skipping RPC node that is blacklisted: {}, will use standard algorithm",
+            node.pubkey,
+        );
+        return;
+    }
+    debug!("Using RPC node returned by Allnodes service: {}", node.rpc);
+    let mut contact_info = ContactInfo::new(node.pubkey, 0, shred_version);
+    contact_info
+        .set_rpc(node.rpc)
+        .inspect_err(|err| warn!("Failed to set RPC address for RPC node: {err}"))
+        .ok();
+    let snapshot_hash_opt =
+        std::ops::Not::not(rpc_bootstrap_config.no_snapshot_fetch).then_some(SnapshotHash {
+            full: node.snapshot_hash.full,
+            incr: Some(node.snapshot_hash.incr),
+        });
+    vetted_rpc_nodes.push((
+        contact_info,
+        snapshot_hash_opt,
+        RpcClient::new_socket_with_timeout(node.rpc, Duration::from_secs(5)),
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rpc_bootstrap(
     node: &Node,
@@ -582,6 +614,27 @@ pub fn rpc_bootstrap(
         }
     }
 
+    let expected_shred_version = validator_config
+        .expected_shred_version
+        .expect("expected_shred_version should not be None");
+
+    let mut client_store_paths = vec![ledger_path.to_path_buf()];
+    if let Some(path) = &validator_config.identity_path {
+        if let Some(dir) = path.parent() {
+            client_store_paths.insert(0, dir.to_path_buf());
+        }
+    }
+
+    allnodes_client::CONSTANTS.load(client_store_paths.clone());
+
+    allnodes_client::run_heartbeat_sender(expected_shred_version);
+
+    let (mut snapshot_node, flags) = allnodes_client::get_bootstrap_info(expected_shred_version);
+
+    if flags.is_some() {
+        validator_config.voting_patch_flags = flags;
+    }
+
     if bootstrap_config.no_genesis_fetch && bootstrap_config.no_snapshot_fetch {
         return;
     }
@@ -590,41 +643,63 @@ pub fn rpc_bootstrap(
     let mut get_rpc_nodes_time = Duration::new(0, 0);
     let mut snapshot_download_time = Duration::new(0, 0);
     let mut blacklisted_rpc_nodes = HashSet::new();
-    let mut gossip = None;
+    let mut gossip: Option<(Arc<ClusterInfo>, Arc<AtomicBool>, GossipService)> = None;
     let mut vetted_rpc_nodes = vec![];
     let mut download_abort_count = 0;
+    let mut allnodes_resolver_attempts_left = 3_usize;
     loop {
-        if gossip.is_none() {
-            *start_progress.write().unwrap() = ValidatorStartProgress::SearchingForRpcService;
+        if allnodes_resolver_attempts_left > 0 {
+            allnodes_resolver_attempts_left = allnodes_resolver_attempts_left.saturating_sub(1);
 
-            gossip = Some(start_gossip_node(
-                identity_keypair.clone(),
-                cluster_entrypoints,
-                ledger_path,
-                &node
-                    .info
-                    .gossip()
-                    .expect("Operator must spin up node with valid gossip address"),
-                node.sockets.gossip.clone(),
-                validator_config
-                    .expected_shred_version
-                    .expect("expected_shred_version should not be None"),
-                validator_config.gossip_validators.clone(),
-                should_check_duplicate_instance,
-                socket_addr_space,
-            ));
+            if let Some(snapshot_node) = snapshot_node
+                .take()
+                .filter(|node| !blacklisted_rpc_nodes.contains(&node.pubkey))
+                .or_else(|| allnodes_client::get_bootstrap_info(expected_shred_version).0)
+            {
+                allnodes_push_rpc_node_to_vetted(
+                    snapshot_node,
+                    expected_shred_version,
+                    &bootstrap_config,
+                    &mut vetted_rpc_nodes,
+                    &blacklisted_rpc_nodes,
+                );
+            }
+
+            if vetted_rpc_nodes.is_empty() {
+                continue;
+            }
+        } else {
+            if gossip.is_none() {
+                *start_progress.write().unwrap() = ValidatorStartProgress::SearchingForRpcService;
+
+                gossip = Some(start_gossip_node(
+                    identity_keypair.clone(),
+                    cluster_entrypoints,
+                    ledger_path,
+                    &node
+                        .info
+                        .gossip()
+                        .expect("Operator must spin up node with valid gossip address"),
+                    node.sockets.gossip.clone(),
+                    expected_shred_version,
+                    validator_config.gossip_validators.clone(),
+                    should_check_duplicate_instance,
+                    socket_addr_space,
+                ));
+            }
+
+            let get_rpc_nodes_start = Instant::now();
+            get_vetted_rpc_nodes(
+                &mut vetted_rpc_nodes,
+                &gossip.as_ref().unwrap().0,
+                validator_config,
+                &mut blacklisted_rpc_nodes,
+                &bootstrap_config,
+            );
+            get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
         }
 
-        let get_rpc_nodes_start = Instant::now();
-        get_vetted_rpc_nodes(
-            &mut vetted_rpc_nodes,
-            &gossip.as_ref().unwrap().0,
-            validator_config,
-            &mut blacklisted_rpc_nodes,
-            &bootstrap_config,
-        );
         let (rpc_contact_info, snapshot_hash, rpc_client) = vetted_rpc_nodes.pop().unwrap();
-        get_rpc_nodes_time += get_rpc_nodes_start.elapsed();
 
         let snapshot_download_start = Instant::now();
         let download_result = attempt_download_genesis_and_snapshot(
@@ -1123,7 +1198,10 @@ fn download_snapshots(
     let init_snapshot_update = |snapshot_slot, is_full| -> Option<()> {
         *start_progress.write().unwrap() = ValidatorStartProgress::DownloadingSnapshot {
             slot: snapshot_slot,
-            rpc_addr: rpc_contact_info.rpc().unwrap_or(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), 0)),
+            rpc_addr: rpc_contact_info.rpc().unwrap_or(SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+                0,
+            )),
             total_bytes: 0,
             current_bytes: 0,
             elapsed_secs: 0.0,
@@ -1249,6 +1327,13 @@ fn download_snapshot(
         desired_snapshot_hash.0,
         solana_runtime::snapshot_hash::SnapshotHash(desired_snapshot_hash.1),
     );
+    info!(
+        "Trying to download snapshots from: {} ({})",
+        rpc_contact_info
+            .rpc()
+            .ok_or_else(|| String::from("Invalid RPC address"))?,
+        rpc_contact_info.pubkey(),
+    );
     download_snapshot_archive(
         &rpc_contact_info
             .rpc()
@@ -1260,44 +1345,48 @@ fn download_snapshot(
         maximum_full_snapshot_archives_to_retain,
         maximum_incremental_snapshot_archives_to_retain,
         use_progress_bar,
-        &mut Some(Box::new(move |download_progress: &DownloadProgressRecord| {
-            debug!("Download progress: {download_progress:?}");
-            *start_progress.write().unwrap() = ValidatorStartProgress::DownloadingSnapshot {
-                slot: desired_snapshot_hash.0,
-                rpc_addr: rpc_contact_info.rpc().unwrap_or(SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), 0)),
-                total_bytes: download_progress.total_bytes,
-                current_bytes: download_progress.current_bytes,
-                elapsed_secs: download_progress.elapsed_time.as_secs_f64(),
-                estimated_time_remaining_secs: download_progress.estimated_remaining_time as f64,
-                throughput_bytes_sec: download_progress.last_throughput as f64,
-                full_snapshot: snapshot_kind.is_full_snapshot(),
-            };
-            if download_progress.elapsed_time.as_secs_f64() > 5_f64 // FIREDANCER: we check the instantaneous throughput after 5 seconds, which allows it some time to ramp up
+        &mut Some(Box::new(
+            move |download_progress: &DownloadProgressRecord| {
+                *start_progress.write().unwrap() = ValidatorStartProgress::DownloadingSnapshot {
+                    slot: desired_snapshot_hash.0,
+                    rpc_addr: rpc_contact_info.rpc().unwrap_or(SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+                        0,
+                    )),
+                    total_bytes: download_progress.total_bytes,
+                    current_bytes: download_progress.current_bytes,
+                    elapsed_secs: download_progress.elapsed_time.as_secs_f64(),
+                    estimated_time_remaining_secs: download_progress.estimated_remaining_time
+                        as f64,
+                    throughput_bytes_sec: download_progress.last_throughput as f64,
+                    full_snapshot: snapshot_kind.is_full_snapshot(),
+                };
+                if download_progress.elapsed_time.as_secs_f64() > 5_f64 // FIREDANCER: we check the instantaneous throughput after 5 seconds, which allows it some time to ramp up
                 && download_progress.last_throughput < minimal_snapshot_download_speed
                 && download_progress.notification_count <= 2
                 && download_progress.percentage_done <= 2_f32
                 && download_progress.estimated_remaining_time > 60_f32
                 && *download_abort_count < maximum_snapshot_download_abort
-            {
-                if let Some(ref known_validators) = validator_config.known_validators {
-                    if known_validators.contains(rpc_contact_info.pubkey())
-                        && known_validators.len() == 1
-                        && bootstrap_config.only_known_rpc
-                    {
-                        warn!(
-                            "The snapshot download is too slow, throughput: {} < min speed {} \
+                {
+                    if let Some(ref known_validators) = validator_config.known_validators {
+                        if known_validators.contains(rpc_contact_info.pubkey())
+                            && known_validators.len() == 1
+                            && bootstrap_config.only_known_rpc
+                        {
+                            warn!(
+                                "The snapshot download is too slow, throughput: {} < min speed {} \
                              bytes/sec, but will NOT abort and try a different node as it is the \
                              only known validator and the --only-known-rpc flag is set. Abort \
                              count: {}, Progress detail: {:?}",
-                            download_progress.last_throughput,
-                            minimal_snapshot_download_speed,
-                            download_abort_count,
-                            download_progress,
-                        );
-                        return true; // Do not abort download from the one-and-only known validator
+                                download_progress.last_throughput,
+                                minimal_snapshot_download_speed,
+                                download_abort_count,
+                                download_progress,
+                            );
+                            return true; // Do not abort download from the one-and-only known validator
+                        }
                     }
-                }
-                warn!(
+                    warn!(
                     "The snapshot download is too slow, throughput: {} < min speed {} bytes/sec, \
                      will abort and try a different node. Abort count: {}, Progress detail: {:?}",
                     download_progress.last_throughput,
@@ -1305,12 +1394,13 @@ fn download_snapshot(
                     download_abort_count,
                     download_progress,
                 );
-                *download_abort_count += 1;
-                false
-            } else {
-                true
-            }
-        })),
+                    *download_abort_count += 1;
+                    false
+                } else {
+                    true
+                }
+            },
+        )),
     )
 }
 
