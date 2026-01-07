@@ -91,6 +91,12 @@ where
         ("manage-block-production", Some(subcommand_matches)) => {
             commands::manage_block_production::execute(subcommand_matches, &ledger_path)
         }
+        ("enable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, true)
+        }
+        ("disable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, false)
+        }
         _ => unreachable!(),
     }
     .unwrap_or_else(|err| {
