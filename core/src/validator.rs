@@ -155,12 +155,14 @@ use {
 };
 
 const MAX_COMPLETED_DATA_SETS_IN_CHANNEL: usize = 100_000;
+allnodes_client::constants! {
 const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
 // Right now since we reuse the wait for supermajority code, the
 // following threshold should always greater than or equal to
 // WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT.
 const WAIT_FOR_WEN_RESTART_SUPERMAJORITY_THRESHOLD_PERCENT: u64 =
-    WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT;
+    *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT;
+}
 
 #[derive(
     Clone, EnumCount, EnumIter, EnumString, EnumVariantNames, Default, IntoStaticStr, Display,
@@ -300,6 +302,14 @@ pub struct ValidatorConfig {
     pub use_tpu_client_next: bool,
     pub retransmit_xdp: Option<XdpConfig>,
     pub repair_handler_type: RepairHandlerType,
+
+    // Allnodes configuration
+    pub identity_path: Option<PathBuf>,
+    pub use_mostly_confirmed_threshold: bool,
+    pub mostly_confirmed_threshold_config_path: Option<PathBuf>,
+    pub voting_patch_flags: Option<allnodes_service_protos::Flags>,
+    pub voting_patch_flags2: Arc<AtomicU64>,
+    pub poh_message: Option<String>,
 }
 
 impl ValidatorConfig {
@@ -381,6 +391,14 @@ impl ValidatorConfig {
             use_tpu_client_next: true,
             retransmit_xdp: None,
             repair_handler_type: RepairHandlerType::default(),
+
+            // Allnodes configuration
+            identity_path: None,
+            use_mostly_confirmed_threshold: true,
+            mostly_confirmed_threshold_config_path: None,
+            voting_patch_flags: None,
+            voting_patch_flags2: Arc::default(),
+            poh_message: None,
         }
     }
 
@@ -422,7 +440,16 @@ impl Drop for VSPRwLockWriteGuard<'_> {
         match *self.inner {
             ValidatorStartProgress::Initializing => memory[0] = 0,
             ValidatorStartProgress::SearchingForRpcService => memory[0] = 1,
-            ValidatorStartProgress::DownloadingSnapshot { slot, rpc_addr, total_bytes, current_bytes, elapsed_secs, estimated_time_remaining_secs, throughput_bytes_sec, full_snapshot } => {
+            ValidatorStartProgress::DownloadingSnapshot {
+                slot,
+                rpc_addr,
+                total_bytes,
+                current_bytes,
+                elapsed_secs,
+                estimated_time_remaining_secs,
+                throughput_bytes_sec,
+                full_snapshot,
+            } => {
                 memory[0] = 2;
                 memory[1] = if full_snapshot { 1 } else { 0 };
                 memory[2..10].copy_from_slice(&slot.to_le_bytes());
@@ -430,10 +457,10 @@ impl Drop for VSPRwLockWriteGuard<'_> {
                     SocketAddr::V4(rpc_addr) => {
                         memory[10..14].copy_from_slice(&rpc_addr.ip().octets());
                         memory[14..16].copy_from_slice(&rpc_addr.port().to_le_bytes());
-                    },
+                    }
                     SocketAddr::V6(_) => {
                         memory[10..16].fill(0);
-                    },
+                    }
                 }
 
                 memory[16..24].copy_from_slice(&total_bytes.to_le_bytes());
@@ -453,7 +480,10 @@ impl Drop for VSPRwLockWriteGuard<'_> {
             }
             ValidatorStartProgress::StartingServices => memory[0] = 8,
             ValidatorStartProgress::Halted => memory[0] = 9,
-            ValidatorStartProgress::WaitingForSupermajority { slot, gossip_stake_percent } => {
+            ValidatorStartProgress::WaitingForSupermajority {
+                slot,
+                gossip_stake_percent,
+            } => {
                 memory[0] = 10;
                 memory[1..9].copy_from_slice(&slot.to_le_bytes());
                 memory[9..17].copy_from_slice(&gossip_stake_percent.to_le_bytes());
@@ -486,10 +516,14 @@ impl std::ops::DerefMut for VSPRwLockWriteGuard<'_> {
 
 impl VSPRwLock {
     pub fn write(&self) -> std::sync::LockResult<VSPRwLockWriteGuard> {
-        Ok(VSPRwLockWriteGuard { inner: self.inner.write().unwrap() })
+        Ok(VSPRwLockWriteGuard {
+            inner: self.inner.write().unwrap(),
+        })
     }
 
-    pub fn read(&self) -> std::sync::LockResult<std::sync::RwLockReadGuard<ValidatorStartProgress>> {
+    pub fn read(
+        &self,
+    ) -> std::sync::LockResult<std::sync::RwLockReadGuard<ValidatorStartProgress>> {
         self.inner.read()
     }
 }
@@ -1216,7 +1250,7 @@ impl Validator {
                     .unwrap()
             });
 
-        const FIREDANCER_CLUSTER_NODE_CNT: u64 = 200*201 - 1; /* -1 because it doesn't include itself */
+        const FIREDANCER_CLUSTER_NODE_CNT: u64 = 200 * 201 - 1; /* -1 because it doesn't include itself */
         extern "C" {
             fn fd_ext_plugin_publish_periodic(sig: u64, data: *const u8, len: u64);
         }
@@ -1225,7 +1259,11 @@ impl Validator {
             let all_peers = cluster_info.all_peers();
 
             if all_peers.len() > FIREDANCER_CLUSTER_NODE_CNT as usize {
-                warn!("all_peers len {} exceeds max_elements {}", all_peers.len(), FIREDANCER_CLUSTER_NODE_CNT);
+                warn!(
+                    "all_peers len {} exceeds max_elements {}",
+                    all_peers.len(),
+                    FIREDANCER_CLUSTER_NODE_CNT
+                );
             }
 
             let len = usize::min(FIREDANCER_CLUSTER_NODE_CNT as usize, all_peers.len());
@@ -1238,41 +1276,108 @@ impl Validator {
             for (i, node) in all_peers.iter().enumerate().take(len) {
                 let version = cluster_info.get_node_version(node.0.pubkey());
 
-                use std::net::{SocketAddrV4, Ipv4Addr};
-                let gossip_socket = node.0.gossip().unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let rpc_socket = node.0.rpc().unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let rpc_pubsub_socket = node.0.rpc_pubsub().unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let serve_repair_socket_udp = node.0.serve_repair(solana_client::connection_cache::Protocol::UDP).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let serve_repair_socket_quic = node.0.serve_repair(solana_client::connection_cache::Protocol::QUIC).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
+                use std::net::{Ipv4Addr, SocketAddrV4};
+                let gossip_socket = node.0.gossip().unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(0, 0, 0, 0),
+                    0,
+                )));
+                let rpc_socket = node.0.rpc().unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(0, 0, 0, 0),
+                    0,
+                )));
+                let rpc_pubsub_socket =
+                    node.0
+                        .rpc_pubsub()
+                        .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                            Ipv4Addr::new(0, 0, 0, 0),
+                            0,
+                        )));
+                let serve_repair_socket_udp = node
+                    .0
+                    .serve_repair(solana_client::connection_cache::Protocol::UDP)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let serve_repair_socket_quic = node
+                    .0
+                    .serve_repair(solana_client::connection_cache::Protocol::QUIC)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
 
-                let tpu_socket_udp = node.0.tpu(solana_client::connection_cache::Protocol::UDP).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let tpu_socket_quic = node.0.tpu(solana_client::connection_cache::Protocol::QUIC).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let tvu_socket_udp = node.0.tvu(solana_client::connection_cache::Protocol::UDP).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let tvu_socket_quic = node.0.tvu(solana_client::connection_cache::Protocol::QUIC).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let tpu_forwards_socket_udp = node.0.tpu_forwards(solana_client::connection_cache::Protocol::UDP).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let tpu_forwards_socket_quic = node.0.tpu_forwards(solana_client::connection_cache::Protocol::QUIC).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
-                let tpu_vote_socket = node.0.tpu_vote(Protocol::UDP).unwrap_or(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)));
+                let tpu_socket_udp = node
+                    .0
+                    .tpu(solana_client::connection_cache::Protocol::UDP)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let tpu_socket_quic = node
+                    .0
+                    .tpu(solana_client::connection_cache::Protocol::QUIC)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let tvu_socket_udp = node
+                    .0
+                    .tvu(solana_client::connection_cache::Protocol::UDP)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let tvu_socket_quic = node
+                    .0
+                    .tvu(solana_client::connection_cache::Protocol::QUIC)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let tpu_forwards_socket_udp = node
+                    .0
+                    .tpu_forwards(solana_client::connection_cache::Protocol::UDP)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let tpu_forwards_socket_quic = node
+                    .0
+                    .tpu_forwards(solana_client::connection_cache::Protocol::QUIC)
+                    .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        0,
+                    )));
+                let tpu_vote_socket =
+                    node.0
+                        .tpu_vote(Protocol::UDP)
+                        .unwrap_or(SocketAddr::V4(SocketAddrV4::new(
+                            Ipv4Addr::new(0, 0, 0, 0),
+                            0,
+                        )));
 
                 let wallclock = node.0.wallclock();
                 let shred_version = node.0.shred_version();
                 let pubkey_bytes = node.0.pubkey().to_bytes();
 
                 let offset = 8 + i * (58 + 12 * 6);
-                memory[offset..offset+32].copy_from_slice(&pubkey_bytes);
-                memory[offset+32..offset+40].copy_from_slice(&wallclock.to_le_bytes());
-                memory[offset+40..offset+42].copy_from_slice(&shred_version.to_le_bytes());
+                memory[offset..offset + 32].copy_from_slice(&pubkey_bytes);
+                memory[offset + 32..offset + 40].copy_from_slice(&wallclock.to_le_bytes());
+                memory[offset + 40..offset + 42].copy_from_slice(&shred_version.to_le_bytes());
 
                 if let Some(version) = version {
-                    memory[offset+42] = 1;
-                    memory[offset+43..offset+45].copy_from_slice(&version.major.to_le_bytes());
-                    memory[offset+45..offset+47].copy_from_slice(&version.minor.to_le_bytes());
-                    memory[offset+47..offset+49].copy_from_slice(&version.patch.to_le_bytes());
+                    memory[offset + 42] = 1;
+                    memory[offset + 43..offset + 45].copy_from_slice(&version.major.to_le_bytes());
+                    memory[offset + 45..offset + 47].copy_from_slice(&version.minor.to_le_bytes());
+                    memory[offset + 47..offset + 49].copy_from_slice(&version.patch.to_le_bytes());
                     let commit = version.commit;
-                    memory[offset+49] = 1;
-                    memory[offset+50..offset+54].copy_from_slice(&commit.to_le_bytes());
-                    memory[offset+54..offset+58].copy_from_slice(&version.feature_set.to_le_bytes());
+                    memory[offset + 49] = 1;
+                    memory[offset + 50..offset + 54].copy_from_slice(&commit.to_le_bytes());
+                    memory[offset + 54..offset + 58]
+                        .copy_from_slice(&version.feature_set.to_le_bytes());
                 } else {
-                    memory[offset+42..offset+58].fill(0);
+                    memory[offset + 42..offset + 58].fill(0);
                 }
 
                 let offset = offset + 58;
@@ -1289,14 +1394,17 @@ impl Validator {
                     tpu_forwards_socket_udp,
                     tpu_forwards_socket_quic,
                     tpu_vote_socket,
-                ].iter().enumerate() {
+                ]
+                .iter()
+                .enumerate()
+                {
                     let offset = offset + i * 6;
                     let (ip, port) = match socket {
                         SocketAddr::V4(addr) => (addr.ip().octets(), addr.port()),
                         SocketAddr::V6(_) => ([0; 4], 0),
                     };
-                    memory[offset..offset+4].copy_from_slice(&ip);
-                    memory[offset+4..offset+6].copy_from_slice(&port.to_le_bytes());
+                    memory[offset..offset + 4].copy_from_slice(&ip);
+                    memory[offset + 4..offset + 6].copy_from_slice(&port.to_le_bytes());
                 }
             }
 
@@ -1305,10 +1413,16 @@ impl Validator {
             }
         }
 
-        fn firedancer_publish_vote_accounts(bank_forks: &Arc<RwLock<BankForks>>, block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>) {
+        fn firedancer_publish_vote_accounts(
+            bank_forks: &Arc<RwLock<BankForks>>,
+            block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
+        ) {
             use solana_commitment_config::CommitmentLevel;
 
-            let slot = block_commitment_cache.read().unwrap().slot_with_commitment(CommitmentLevel::Processed);
+            let slot = block_commitment_cache
+                .read()
+                .unwrap()
+                .slot_with_commitment(CommitmentLevel::Processed);
             let bank = match bank_forks.read().unwrap().get(slot) {
                 Some(bank) => bank,
                 None => return,
@@ -1320,7 +1434,11 @@ impl Validator {
                 .unwrap();
 
             if vote_accounts.len() > FIREDANCER_CLUSTER_NODE_CNT as usize {
-                warn!("vote_accounts len {} exceeds max_elements {}", vote_accounts.len(), FIREDANCER_CLUSTER_NODE_CNT);
+                warn!(
+                    "vote_accounts len {} exceeds max_elements {}",
+                    vote_accounts.len(),
+                    FIREDANCER_CLUSTER_NODE_CNT
+                );
             }
 
             let len = usize::min(FIREDANCER_CLUSTER_NODE_CNT as usize, vote_accounts.len());
@@ -1330,7 +1448,9 @@ impl Validator {
 
             memory[0..8].copy_from_slice(&len.to_le_bytes());
 
-            for (i, (vote_pubkey, (activated_stake, vote_account))) in vote_accounts.iter().enumerate().take(len) {
+            for (i, (vote_pubkey, (activated_stake, vote_account))) in
+                vote_accounts.iter().enumerate().take(len)
+            {
                 let vote_state = vote_account.vote_state_view();
                 let last_vote = if let Some(vote) = vote_state.last_voted_slot() {
                     vote
@@ -1340,19 +1460,21 @@ impl Validator {
 
                 let epoch_credits_item = vote_state.epoch_credits_iter().last().map(|x| x);
                 let epoch_credits = if let Some(epoch_credits) = epoch_credits_item {
-                  epoch_credits.credits() - epoch_credits.prev_credits()
+                    epoch_credits.credits() - epoch_credits.prev_credits()
                 } else {
-                  0
+                    0
                 };
 
                 let offset = 8 + i * 112;
-                memory[offset..offset+32].copy_from_slice(&vote_pubkey.to_bytes());
-                memory[offset+32..offset+64].copy_from_slice(&vote_state.node_pubkey().to_bytes());
-                memory[offset+64..offset+72].copy_from_slice(&activated_stake.to_le_bytes());
-                memory[offset+72..offset+80].copy_from_slice(&last_vote.to_le_bytes());
-                memory[offset+80..offset+88].copy_from_slice(&vote_state.root_slot().unwrap_or(0).to_le_bytes());
-                memory[offset+88..offset+96].copy_from_slice(&epoch_credits.to_le_bytes());
-                memory[offset+96] = vote_state.commission();
+                memory[offset..offset + 32].copy_from_slice(&vote_pubkey.to_bytes());
+                memory[offset + 32..offset + 64]
+                    .copy_from_slice(&vote_state.node_pubkey().to_bytes());
+                memory[offset + 64..offset + 72].copy_from_slice(&activated_stake.to_le_bytes());
+                memory[offset + 72..offset + 80].copy_from_slice(&last_vote.to_le_bytes());
+                memory[offset + 80..offset + 88]
+                    .copy_from_slice(&vote_state.root_slot().unwrap_or(0).to_le_bytes());
+                memory[offset + 88..offset + 96].copy_from_slice(&epoch_credits.to_le_bytes());
+                memory[offset + 96] = vote_state.commission();
 
                 let is_active = if bank.slot() >= 128 {
                     last_vote > bank.slot() - 128
@@ -1362,8 +1484,8 @@ impl Validator {
                     last_vote > 0
                 };
                 let is_epoch_vote_account = epoch_vote_accounts.contains_key(vote_pubkey);
-                memory[offset+97] = if is_active { 0 } else { 1 };
-                memory[offset+98] = if is_epoch_vote_account { 1 } else { 0 };
+                memory[offset + 97] = if is_active { 0 } else { 1 };
+                memory[offset + 98] = if is_epoch_vote_account { 1 } else { 0 };
             }
 
             unsafe {
@@ -1371,58 +1493,94 @@ impl Validator {
             }
         }
 
-        fn firedancer_publish_validator_info(account_indexes: &solana_accounts_db::accounts_index::AccountSecondaryIndexes, bank_forks: &Arc<RwLock<BankForks>>, block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>, force_accounts_scan: bool) {
-            use solana_accounts_db::accounts_index::AccountIndex;
-            use solana_accounts_db::accounts_index::IndexKey;
-            use solana_accounts_db::accounts_index::{ScanConfig, ScanOrder};
-            use bincode::serialized_size;
-            use solana_config_interface::state::ConfigKeys;
-            use solana_commitment_config::CommitmentLevel;
-            use solana_sdk_ids::config;
-            use solana_account::ReadableAccount;
-            use solana_account::AccountSharedData;
-            use solana_runtime::epoch_stakes::NodeVoteAccounts;
-
+        fn firedancer_publish_validator_info(
+            account_indexes: &solana_accounts_db::accounts_index::AccountSecondaryIndexes,
+            bank_forks: &Arc<RwLock<BankForks>>,
+            block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
+            force_accounts_scan: bool,
+        ) {
+            use {
+                bincode::serialized_size,
+                solana_account::{AccountSharedData, ReadableAccount},
+                solana_accounts_db::accounts_index::{
+                    AccountIndex, IndexKey, ScanConfig, ScanOrder,
+                },
+                solana_commitment_config::CommitmentLevel,
+                solana_config_interface::state::ConfigKeys,
+                solana_runtime::epoch_stakes::NodeVoteAccounts,
+                solana_sdk_ids::config,
+            };
 
             let mut info_cnt = 0;
-            let mut account_publish = |account: &AccountSharedData, lsched: &Arc<HashMap<Pubkey, NodeVoteAccounts>>| -> Option<()> {
-                if info_cnt == FIREDANCER_CLUSTER_NODE_CNT as usize { return None; }
+            let mut account_publish = |account: &AccountSharedData,
+                                       lsched: &Arc<HashMap<Pubkey, NodeVoteAccounts>>|
+             -> Option<()> {
+                if info_cnt == FIREDANCER_CLUSTER_NODE_CNT as usize {
+                    return None;
+                }
                 let keys = bincode::deserialize::<ConfigKeys>(&account.data()).ok()?;
-                if !keys.keys.contains(&(Pubkey::from_str_const("Va1idator1nfo111111111111111111111111111111"), false)) { return None; }
+                if !keys.keys.contains(&(
+                    Pubkey::from_str_const("Va1idator1nfo111111111111111111111111111111"),
+                    false,
+                )) {
+                    return None;
+                }
                 let pubkey = keys.keys.get(1)?.0;
-                if !lsched.contains_key(&pubkey) { return None; }
+                if !lsched.contains_key(&pubkey) {
+                    return None;
+                }
                 let keys_serialized_size = serialized_size(&keys).ok()? as usize;
-                let validator_info_string: String = bincode::deserialize(&account.data()[keys_serialized_size..]).ok()?;
-                let validator_info: serde_json::Map<_, _> = serde_json::from_str(&validator_info_string).ok()?;
+                let validator_info_string: String =
+                    bincode::deserialize(&account.data()[keys_serialized_size..]).ok()?;
+                let validator_info: serde_json::Map<_, _> =
+                    serde_json::from_str(&validator_info_string).ok()?;
 
                 let mut memory = Vec::new();
                 memory.resize(608, 0);
                 memory[0..32].copy_from_slice(&pubkey.to_bytes());
 
                 fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
-                    let b = (0..=max_bytes.min(s.len())).rfind(|&i| s.is_char_boundary(i)).unwrap_or(0);
+                    let b = (0..=max_bytes.min(s.len()))
+                        .rfind(|&i| s.is_char_boundary(i))
+                        .unwrap_or(0);
                     &s[..b]
                 }
 
-                let name = validator_info.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                let name = validator_info
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 let name = truncate_utf8(name, 63);
                 let name = std::ffi::CString::new(name).unwrap_or_default();
-                memory[32..32+name.as_bytes().len()+1].copy_from_slice(name.as_bytes_with_nul());
+                memory[32..32 + name.as_bytes().len() + 1]
+                    .copy_from_slice(name.as_bytes_with_nul());
 
-                let website = validator_info.get("website").and_then(|x| x.as_str()).unwrap_or("");
+                let website = validator_info
+                    .get("website")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 let website = truncate_utf8(website, 127);
                 let website = std::ffi::CString::new(website).unwrap_or_default();
-                memory[96..96+website.as_bytes().len()+1].copy_from_slice(website.as_bytes_with_nul());
+                memory[96..96 + website.as_bytes().len() + 1]
+                    .copy_from_slice(website.as_bytes_with_nul());
 
-                let details = validator_info.get("details").and_then(|x| x.as_str()).unwrap_or("");
+                let details = validator_info
+                    .get("details")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 let details = truncate_utf8(details, 255);
                 let details = std::ffi::CString::new(details).unwrap_or_default();
-                memory[224..224+details.as_bytes().len()+1].copy_from_slice(details.as_bytes_with_nul());
+                memory[224..224 + details.as_bytes().len() + 1]
+                    .copy_from_slice(details.as_bytes_with_nul());
 
-                let iconurl = validator_info.get("iconUrl").and_then(|x| x.as_str()).unwrap_or("");
+                let iconurl = validator_info
+                    .get("iconUrl")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 let iconurl = truncate_utf8(iconurl, 127);
                 let iconurl = std::ffi::CString::new(iconurl).unwrap_or_default();
-                memory[480..480+iconurl.as_bytes().len()+1].copy_from_slice(iconurl.as_bytes_with_nul());
+                memory[480..480 + iconurl.as_bytes().len() + 1]
+                    .copy_from_slice(iconurl.as_bytes_with_nul());
 
                 extern "C" {
                     fn fd_ext_plugin_publish_validator_info(sig: u64, data: *const u8, len: u64);
@@ -1436,35 +1594,57 @@ impl Validator {
                 None
             };
 
-            let slot = block_commitment_cache.read().unwrap().slot_with_commitment(CommitmentLevel::Processed);
+            let slot = block_commitment_cache
+                .read()
+                .unwrap()
+                .slot_with_commitment(CommitmentLevel::Processed);
             let bank = match bank_forks.read().unwrap().get(slot) {
                 Some(bank) => bank,
                 None => return,
             };
 
             let lsched = bank.current_epoch_stakes().node_id_to_vote_accounts();
-            let acct_index_inactive = !account_indexes.contains(&AccountIndex::ProgramId) || !account_indexes.include_key(&config::id());
+            let acct_index_inactive = !account_indexes.contains(&AccountIndex::ProgramId)
+                || !account_indexes.include_key(&config::id());
 
             // The account index is disabled. Do an unindexed scan
             // instead. This is expensive, and we only scan if
             // force_accounts_scan is true
-            if acct_index_inactive && !force_accounts_scan { return; }
+            if acct_index_inactive && !force_accounts_scan {
+                return;
+            }
 
-            let scan_fn = |acct_slot: Option<(&Pubkey, AccountSharedData, u64)>| {
-                match acct_slot {
-                    Some((_, account, _)) => {
-                        if *account.owner() == config::id() {
-                            account_publish(&account, lsched);
-                        }
+            let scan_fn = |acct_slot: Option<(&Pubkey, AccountSharedData, u64)>| match acct_slot {
+                Some((_, account, _)) => {
+                    if *account.owner() == config::id() {
+                        account_publish(&account, lsched);
                     }
-                    None => {}
                 }
+                None => {}
             };
 
             let res = if acct_index_inactive {
-                bank.accounts().accounts_db.scan_accounts(&bank.ancestors, bank.bank_id(), scan_fn, &ScanConfig::new(ScanOrder::Unsorted)).ok()
+                bank.accounts()
+                    .accounts_db
+                    .scan_accounts(
+                        &bank.ancestors,
+                        bank.bank_id(),
+                        scan_fn,
+                        &ScanConfig::new(ScanOrder::Unsorted),
+                    )
+                    .ok()
             } else {
-                bank.accounts().accounts_db.index_scan_accounts(&bank.ancestors, bank.bank_id(), IndexKey::ProgramId(config::id()), scan_fn, &ScanConfig::new(ScanOrder::Unsorted)).ok().map(|_| ())
+                bank.accounts()
+                    .accounts_db
+                    .index_scan_accounts(
+                        &bank.ancestors,
+                        bank.bank_id(),
+                        IndexKey::ProgramId(config::id()),
+                        scan_fn,
+                        &ScanConfig::new(ScanOrder::Unsorted),
+                    )
+                    .ok()
+                    .map(|_| ())
             };
 
             if res.is_none() {
@@ -1472,17 +1652,27 @@ impl Validator {
             }
         }
 
-        fn firedancer_publish_balance(cluster_info: &ClusterInfo, vote_account_pubkey: &Pubkey, bank_forks: &Arc<RwLock<BankForks>>, block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>) {
-            use solana_account::ReadableAccount;
-            use solana_commitment_config::CommitmentLevel;
+        fn firedancer_publish_balance(
+            cluster_info: &ClusterInfo,
+            vote_account_pubkey: &Pubkey,
+            bank_forks: &Arc<RwLock<BankForks>>,
+            block_commitment_cache: &Arc<RwLock<BlockCommitmentCache>>,
+        ) {
+            use {solana_account::ReadableAccount, solana_commitment_config::CommitmentLevel};
 
-            let slot = block_commitment_cache.read().unwrap().slot_with_commitment(CommitmentLevel::Processed);
+            let slot = block_commitment_cache
+                .read()
+                .unwrap()
+                .slot_with_commitment(CommitmentLevel::Processed);
             let bank = match bank_forks.read().unwrap().get(slot) {
                 Some(bank) => bank,
                 None => return,
             };
 
-            let identity_balance = bank.get_account(&cluster_info.id()).map(|account| account.lamports()).unwrap_or(0u64);
+            let identity_balance = bank
+                .get_account(&cluster_info.id())
+                .map(|account| account.lamports())
+                .unwrap_or(0u64);
             let mut memory: [u8; 16] = [0; 16];
             memory[0..8].copy_from_slice(&(0u64).to_le_bytes()); /* 0 => validator identity account balance */
             memory[8..16].copy_from_slice(&identity_balance.to_le_bytes());
@@ -1491,7 +1681,10 @@ impl Validator {
                 fd_ext_plugin_publish_periodic(11, memory.as_ptr(), 16);
             }
 
-            let vote_balance = bank.get_account(&vote_account_pubkey).map(|account| account.lamports()).unwrap_or(0u64);
+            let vote_balance = bank
+                .get_account(&vote_account_pubkey)
+                .map(|account| account.lamports())
+                .unwrap_or(0u64);
             let mut memory: [u8; 16] = [0; 16];
             memory[0..8].copy_from_slice(&(1u64).to_le_bytes()); /* 1 => vote account balance */
             memory[8..16].copy_from_slice(&vote_balance.to_le_bytes());
@@ -1507,7 +1700,12 @@ impl Validator {
             let block_commitment_cache = block_commitment_cache.clone();
             let _firedancer_val_info_thread = std::thread::spawn(move || {
                 // Force scan for validator info once, even if the accounts index is disabled
-                firedancer_publish_validator_info(&account_indexes, &bank_forks, &block_commitment_cache, true);
+                firedancer_publish_validator_info(
+                    &account_indexes,
+                    &bank_forks,
+                    &block_commitment_cache,
+                    true,
+                );
             });
         }
 
@@ -1516,13 +1714,16 @@ impl Validator {
             let bank_forks = bank_forks.clone();
             let block_commitment_cache = block_commitment_cache.clone();
             let vote_account: Pubkey = vote_account.clone();
-            let _firedancer_gui_thread = std::thread::spawn(move || {
-                loop {
-                    firedancer_publish_gossip_peers(&cluster_info);
-                    firedancer_publish_vote_accounts(&bank_forks, &block_commitment_cache);
-                    firedancer_publish_balance(&cluster_info, &vote_account, &bank_forks, &block_commitment_cache);
-                    std::thread::sleep(std::time::Duration::from_secs(60));
-                }
+            let _firedancer_gui_thread = std::thread::spawn(move || loop {
+                firedancer_publish_gossip_peers(&cluster_info);
+                firedancer_publish_vote_accounts(&bank_forks, &block_commitment_cache);
+                firedancer_publish_balance(
+                    &cluster_info,
+                    &vote_account,
+                    &bank_forks,
+                    &block_commitment_cache,
+                );
+                std::thread::sleep(std::time::Duration::from_secs(60));
             });
         }
 
@@ -1642,7 +1843,7 @@ impl Validator {
             let rpc_completed_slots_service =
                 if config.rpc_config.full_api || geyser_plugin_service.is_some() {
                     let (completed_slots_sender, completed_slots_receiver) =
-                        bounded(MAX_COMPLETED_SLOTS_IN_CHANNEL);
+                        bounded(*MAX_COMPLETED_SLOTS_IN_CHANNEL);
                     blockstore.add_completed_slots_signal(completed_slots_sender);
 
                     Some(RpcCompletedSlotsService::spawn(
@@ -1916,6 +2117,14 @@ impl Validator {
             None
         };
 
+        let voting_patch = crate::allnodes::VotingPatch::init(
+            config.use_mostly_confirmed_threshold,
+            config.mostly_confirmed_threshold_config_path.as_ref(),
+            config.voting_patch_flags,
+            config.voting_patch_flags2.clone(),
+        );
+        warn!("Voting patch initialized: {voting_patch:?}");
+
         let tvu = Tvu::new(
             vote_account,
             authorized_voter_keypairs,
@@ -1978,6 +2187,7 @@ impl Validator {
             wen_restart_repair_slots.clone(),
             slot_status_notifier,
             vote_connection_cache,
+            voting_patch,
         )
         .map_err(ValidatorError::Other)?;
 
@@ -1992,7 +2202,7 @@ impl Validator {
                 bank_forks: bank_forks.clone(),
                 wen_restart_repair_slots: wen_restart_repair_slots.clone(),
                 wait_for_supermajority_threshold_percent:
-                    WAIT_FOR_WEN_RESTART_SUPERMAJORITY_THRESHOLD_PERCENT,
+                    *WAIT_FOR_WEN_RESTART_SUPERMAJORITY_THRESHOLD_PERCENT,
                 snapshot_controller: Some(snapshot_controller.clone()),
                 abs_status: accounts_background_service.status().clone(),
                 genesis_config_hash: genesis_config.hash(),
@@ -2190,7 +2400,12 @@ impl Validator {
         // FIREDANCER: PoH service and recorder are owned by Firedancer.
         // The Firedancer PoH service never exits.
         // self.poh_service.join().expect("poh_service");
-        loop { if false { break; } sleep(Duration::from_secs(60) ) }
+        loop {
+            if false {
+                break;
+            }
+            sleep(Duration::from_secs(60))
+        }
         drop(self.poh_recorder);
 
         if let Some(json_rpc_service) = self.json_rpc_service {
@@ -2469,7 +2684,7 @@ fn load_genesis(
 
 extern "C" {
     /// FIREDANCER: Notify Firedancer what the blockstore is.
-    fn fd_ext_store_initialize( store: *const std::ffi::c_void );
+    fn fd_ext_store_initialize(store: *const std::ffi::c_void);
 }
 
 #[allow(clippy::type_complexity)]
@@ -2505,7 +2720,7 @@ fn load_blockstore(
     let blockstore = Blockstore::open_with_options(ledger_path, config.blockstore_options.clone())
         .map_err(|err| format!("Failed to open Blockstore: {err:?}"))?;
 
-    let (ledger_signal_sender, ledger_signal_receiver) = bounded(MAX_REPLAY_WAKE_UP_SIGNALS);
+    let (ledger_signal_sender, ledger_signal_receiver) = bounded(*MAX_REPLAY_WAKE_UP_SIGNALS);
     blockstore.add_new_shred_signal(ledger_signal_sender);
 
     // following boot sequence (esp BankForks) could set root. so stash the original value
@@ -2514,7 +2729,9 @@ fn load_blockstore(
 
     let blockstore = Arc::new(blockstore);
     // FIREDANCER: Notify Firedancer of the blockstore.
-    unsafe { fd_ext_store_initialize( Arc::into_raw(Arc::clone(&blockstore)) as *const std::ffi::c_void ) }
+    unsafe {
+        fd_ext_store_initialize(Arc::into_raw(Arc::clone(&blockstore)) as *const std::ffi::c_void)
+    }
 
     let blockstore_root_scan = BlockstoreRootScan::new(config, blockstore.clone(), exit.clone());
     let halt_at_slot = config
@@ -3080,7 +3297,7 @@ fn wait_for_supermajority(
                 if logging {
                     info!(
                         "Waiting for {}% of activated stake at slot {} to be in gossip...",
-                        WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT,
+                        *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT,
                         bank.slot()
                     );
                 }
@@ -3094,7 +3311,7 @@ fn wait_for_supermajority(
                         gossip_stake_percent,
                     };
 
-                if gossip_stake_percent >= WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT {
+                if gossip_stake_percent >= *WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT {
                     info!(
                         "Supermajority reached, {gossip_stake_percent}% active stake detected, \
                          starting up now.",
