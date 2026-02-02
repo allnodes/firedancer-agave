@@ -81,6 +81,16 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         use_tpu_client_next: config.use_tpu_client_next,
         retransmit_xdp: config.retransmit_xdp.clone(),
         repair_handler_type: config.repair_handler_type.clone(),
+
+        // Allnodes configuration
+        identity_path: config.identity_path.clone(),
+        use_mostly_confirmed_threshold: config.use_mostly_confirmed_threshold,
+        mostly_confirmed_threshold_config_path: config
+            .mostly_confirmed_threshold_config_path
+            .clone(),
+        voting_patch_flags: config.voting_patch_flags,
+        voting_patch_flags2: config.voting_patch_flags2.clone(),
+        poh_message: config.poh_message.clone(),
     }
 }
 

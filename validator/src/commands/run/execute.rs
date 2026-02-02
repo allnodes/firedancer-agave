@@ -125,7 +125,7 @@ pub fn execute(
         println!("log file: {logfile}");
         Some(logfile)
     };
-    let use_progress_bar = logfile.is_none();
+    let use_progress_bar = logfile.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // FIREDANCER: Redirect logging to Firedancer
     // let _logger_thread = redirect_stderr_to_file(logfile);
     let _ = redirect_stderr_to_file; // Silence unused warning
@@ -249,22 +249,6 @@ pub fn execute(
             ledger_path.display(),
         )
     })?;
-
-    let max_ledger_shreds = if matches.is_present("limit_ledger_size") {
-        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
-            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
-            None => DEFAULT_MAX_LEDGER_SHREDS,
-        };
-        if limit_ledger_size < DEFAULT_MIN_MAX_LEDGER_SHREDS {
-            Err(format!(
-                "The provided --limit-ledger-size value was too small, the minimum value is \
-                 {DEFAULT_MIN_MAX_LEDGER_SHREDS}"
-            ))?;
-        }
-        Some(limit_ledger_size)
-    } else {
-        None
-    };
 
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
@@ -666,7 +650,7 @@ pub fn execute(
         repair_whitelist,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        max_ledger_shreds,
+        max_ledger_shreds: None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -761,9 +745,38 @@ pub fn execute(
             Arc::new(AtomicBool::new(false)),
         )]
         .into(),
+
+        // Allnodes config
+        identity_path: match matches.value_of("identity") {
+            None | Some("ASK") => None,
+            Some(path) => PathBuf::from_str(path).ok(),
+        },
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
+        voting_patch_flags2: solana_core::allnodes::init_flags2(
+            matches.is_present("experimental_feature"),
+        ),
+        poh_message: None,
     };
 
-    let reserved = validator_config
+    let advertised_ip = resolve_advertised_ip(matches, &bind_addresses, &entrypoint_addrs)?;
+
+    solana_core::allnodes::init(
+        &ledger_path,
+        &mut validator_config,
+        advertised_ip,
+        matches.is_present("enable_xdp"),
+        xdp_interface,
+        xdp_zero_copy,
+    );
+
+    let mut reserved = validator_config
         .retransmit_xdp
         .as_ref()
         .map(|xdp| xdp.cpus.clone())
@@ -771,6 +784,9 @@ pub fn execute(
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
+
+    reserved.insert(validator_config.poh_pinned_cpu_core);
+
     if !reserved.is_empty() {
         let available = core_affinity::get_core_ids()
             .unwrap_or_default()
@@ -844,6 +860,7 @@ pub fn execute(
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
+            flags2: validator_config.voting_patch_flags2.clone(),
             rpc_addr: validator_config.rpc_addrs.map(|(rpc_addr, _)| rpc_addr),
             start_time: std::time::SystemTime::now(),
             validator_exit: validator_config.validator_exit.clone(),
@@ -857,49 +874,6 @@ pub fn execute(
         },
     );
 
-    let gossip_host = matches
-        .value_of("gossip_host")
-        .map(|gossip_host| {
-            warn!(
-                "--gossip-host is deprecated. Use --bind-address or rely on automatic public IP \
-                 discovery instead."
-            );
-            solana_net_utils::parse_host(gossip_host)
-                .map_err(|err| format!("failed to parse --gossip-host: {err}"))
-        })
-        .transpose()?;
-
-    let advertised_ip = if let Some(ip) = gossip_host {
-        ip
-    } else if !bind_addresses.active().is_unspecified() && !bind_addresses.active().is_loopback() {
-        bind_addresses.active()
-    } else if !entrypoint_addrs.is_empty() {
-        let mut order: Vec<_> = (0..entrypoint_addrs.len()).collect();
-        order.shuffle(&mut thread_rng());
-
-        order
-            .into_iter()
-            .find_map(|i| {
-                let entrypoint_addr = &entrypoint_addrs[i];
-                info!(
-                    "Contacting {entrypoint_addr} to determine the validator's public IP address"
-                );
-                solana_net_utils::get_public_ip_addr_with_binding(
-                    entrypoint_addr,
-                    bind_addresses.active(),
-                )
-                .map_or_else(
-                    |err| {
-                        warn!("Failed to contact cluster entrypoint {entrypoint_addr}: {err}");
-                        None
-                    },
-                    Some,
-                )
-            })
-            .ok_or_else(|| "unable to determine the validator's public IP address".to_string())?
-    } else {
-        IpAddr::V4(Ipv4Addr::LOCALHOST)
-    };
     let gossip_port = value_t!(matches, "gossip_port", u16).or_else(|_| {
         solana_net_utils::find_available_port_in_range(bind_addresses.active(), (0, 1))
             .map_err(|err| format!("unable to find an available gossip port: {err}"))
@@ -992,6 +966,11 @@ pub fn execute(
         firedancer_tvu_port,
     );
 
+    info!(
+        "Bound all network sockets as follows:\n{}",
+        allnodes_solana::format_sockets(&node.sockets)
+    );
+
     if restricted_repair_only_mode {
         if validator_config.wen_restart_proto_path.is_some() {
             Err("--restricted-repair-only-mode is not compatible with --wen_restart".to_string())?;
@@ -1065,6 +1044,20 @@ pub fn execute(
             maximum_snapshot_download_abort,
             run_args.socket_addr_space,
         );
+    }
+
+    if matches.is_present("limit_ledger_size") {
+        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
+            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
+            None => *DEFAULT_MAX_LEDGER_SHREDS,
+        };
+        if limit_ledger_size < *DEFAULT_MIN_MAX_LEDGER_SHREDS {
+            Err(format!(
+                "The provided --limit-ledger-size value was too small, the minimum value is {}",
+                *DEFAULT_MIN_MAX_LEDGER_SHREDS,
+            ))?;
+        }
+        validator_config.max_ledger_shreds = Some(limit_ledger_size);
     }
 
     if operation == Operation::Initialize {
@@ -1159,6 +1152,68 @@ pub fn execute(
     Ok(())
 }
 
+fn resolve_advertised_ip(
+    matches: &ArgMatches,
+    bind_addresses: &BindIpAddrs,
+    entrypoint_addrs: &[SocketAddr],
+) -> Result<IpAddr, Box<dyn std::error::Error>> {
+    let gossip_host = matches
+        .value_of("gossip_host")
+        .map(|gossip_host| {
+            warn!(
+                "--gossip-host is deprecated. Use --bind-address or rely on automatic public IP \
+                 discovery instead."
+            );
+            solana_net_utils::parse_host(gossip_host)
+                .map_err(|err| format!("failed to parse --gossip-host: {err}"))
+        })
+        .transpose()?;
+
+    let advertised_ip = matches
+        .value_of("advertised_ip")
+        .map(|advertised_ip| {
+            solana_net_utils::parse_host(advertised_ip)
+                .map_err(|err| format!("failed to parse --advertised-ip: {err}"))
+        })
+        .transpose()?;
+
+    let advertised_ip = if let Some(ip) = gossip_host {
+        ip
+    } else if let Some(cli_ip) = advertised_ip {
+        cli_ip
+    } else if !bind_addresses.active().is_unspecified() && !bind_addresses.active().is_loopback() {
+        bind_addresses.active()
+    } else if !entrypoint_addrs.is_empty() {
+        let mut order: Vec<_> = (0..entrypoint_addrs.len()).collect();
+        order.shuffle(&mut thread_rng());
+
+        order
+            .into_iter()
+            .find_map(|i| {
+                let entrypoint_addr = &entrypoint_addrs[i];
+                info!(
+                    "Contacting {entrypoint_addr} to determine the validator's public IP address"
+                );
+                solana_net_utils::get_public_ip_addr_with_binding(
+                    entrypoint_addr,
+                    bind_addresses.active(),
+                )
+                .map_or_else(
+                    |err| {
+                        warn!("Failed to contact cluster entrypoint {entrypoint_addr}: {err}");
+                        None
+                    },
+                    Some,
+                )
+            })
+            .ok_or_else(|| "unable to determine the validator's public IP address".to_string())?
+    } else {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    };
+
+    Ok(advertised_ip)
+}
+
 // This function is duplicated in ledger-tool/src/main.rs...
 fn hardforks_of(matches: &ArgMatches<'_>, name: &str) -> Option<Vec<Slot>> {
     if matches.is_present(name) {
@@ -1227,8 +1282,32 @@ fn new_snapshot_config(
     account_paths: &[PathBuf],
     incremental_snapshot_fetch: bool,
 ) -> Result<SnapshotConfig, Box<dyn std::error::Error>> {
+    let mut no_snapshots = if matches.occurrences_of("no_snapshots") == 0 {
+        None
+    } else {
+        matches
+            .value_of("no_snapshots")
+            .map(|value| value == "true")
+    };
+    if matches.occurrences_of("snapshot_interval_slots") > 0
+        || matches.occurrences_of("full_snapshot_interval_slots") > 0
+    {
+        match no_snapshots {
+            Some(true) => {
+                return Err(Box::new(clap::Error::with_description(
+                    "The --no-snapshots argument is not compatible with --snapshot-interval-slots \
+                     or --full-snapshot-interval-slots",
+                    clap::ErrorKind::ArgumentConflict,
+                )));
+            }
+            None | Some(false) => {
+                no_snapshots = Some(false);
+            }
+        }
+    }
+
     let (full_snapshot_archive_interval, incremental_snapshot_archive_interval) =
-        if matches.is_present("no_snapshots") {
+        if no_snapshots.unwrap_or(true) {
             // snapshots are disabled
             (SnapshotInterval::Disabled, SnapshotInterval::Disabled)
         } else {
