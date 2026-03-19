@@ -174,6 +174,7 @@ impl Tvu {
         wen_restart_repair_slots: Option<Arc<RwLock<Vec<Slot>>>>,
         slot_status_notifier: Option<SlotStatusNotifier>,
         vote_connection_cache: Arc<ConnectionCache>,
+        voting_patch: crate::allnodes::VotingPatch,
     ) -> Result<Self, String> {
         let in_wen_restart = wen_restart_repair_slots.is_some();
 
@@ -379,6 +380,7 @@ impl Tvu {
                 replay_stage_config,
                 replay_senders,
                 replay_receivers,
+                voting_patch,
             )?)
         };
 
@@ -617,6 +619,7 @@ pub mod tests {
             wen_restart_repair_slots,
             None,
             Arc::new(connection_cache),
+            crate::allnodes::VotingPatch::default(),
         )
         .expect("assume success");
         if enable_wen_restart {

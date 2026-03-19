@@ -101,9 +101,11 @@ mod tpu_to_pack;
 const MAX_NUM_WORKERS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const DEFAULT_NUM_WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
+allnodes_client::constants! {
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 const TOTAL_BUFFERED_PACKETS: usize = 100_000;
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
+}
 
 #[derive(Debug, Default)]
 pub struct BankingStageStats {
@@ -434,9 +436,9 @@ impl BankingStage {
         );
 
         committer::FIREDANCER_BUNDLE_COMMITTER.store(
-          Box::into_raw(Box::new(bundle_committer)) as *const crate::bundle_stage::committer::Committer
-              as u64,
-          Ordering::Release,
+            Box::into_raw(Box::new(bundle_committer))
+                as *const crate::bundle_stage::committer::Committer as u64,
+            Ordering::Release,
         );
 
         Self {
@@ -498,8 +500,8 @@ impl BankingStage {
         // to reuse the code in there for committing transactions. We just store
         // one in a global here on boot.
         committer::FIREDANCER_COMMITTER.store(
-          Box::into_raw(Box::new(context.committer.clone())) as *const Committer as u64,
-          Ordering::Release,
+            Box::into_raw(Box::new(context.committer.clone())) as *const Committer as u64,
+            Ordering::Release,
         );
         assert!(num_workers <= BankingStage::max_num_workers());
         let num_workers = num_workers.get();
