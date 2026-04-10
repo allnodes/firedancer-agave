@@ -226,6 +226,7 @@ impl Tvu {
         slot_status_notifier: Option<SlotStatusNotifier>,
         vote_connection_cache: Arc<ConnectionCache>,
         votor_init: AlpenglowInitializationState,
+        voting_patch: crate::allnodes::VotingPatch,
     ) -> Result<Self, String> {
         let migration_status = bank_forks.read().unwrap().migration_status();
 
@@ -554,7 +555,12 @@ impl Tvu {
 
         let drop_bank_service = DropBankService::new(drop_bank_receiver);
 
-        let replay_stage = ReplayStage::new(replay_stage_config, replay_senders, replay_receivers)?;
+        let replay_stage = ReplayStage::new(
+            replay_stage_config,
+            replay_senders,
+            replay_receivers,
+            voting_patch,
+        )?;
 
         let blockstore_cleanup_service = BlockstoreCleanupService::new(
             blockstore.clone(),
@@ -834,6 +840,7 @@ pub mod tests {
                 bls_connection_cache: Arc::new(bls_connection_cache),
                 voting_service_test_override: None,
             },
+            crate::allnodes::VotingPatch::default(),
         )
         .expect("assume success");
         exit.store(true, Ordering::Relaxed);
