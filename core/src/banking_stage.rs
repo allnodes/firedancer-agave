@@ -104,9 +104,11 @@ mod tpu_to_pack;
 const MAX_NUM_WORKERS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const DEFAULT_NUM_WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
+allnodes_client::constants! {
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 const TOTAL_BUFFERED_PACKETS: usize = 100_000;
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
+}
 
 #[derive(Debug, Default)]
 pub struct BankingStageStats {
@@ -448,9 +450,9 @@ impl BankingStage {
             .unwrap();
 
         committer::FIREDANCER_BUNDLE_COMMITTER.store(
-          Box::into_raw(Box::new(bundle_committer)) as *const crate::bundle_stage::committer::Committer
-              as u64,
-          Ordering::Release,
+            Box::into_raw(Box::new(bundle_committer))
+                as *const crate::bundle_stage::committer::Committer as u64,
+            Ordering::Release,
         );
 
         BankingStageHandle {
@@ -562,8 +564,8 @@ impl BankingStage {
         // to reuse the code in there for committing transactions. We just store
         // one in a global here on boot.
         committer::FIREDANCER_COMMITTER.store(
-          Box::into_raw(Box::new(self.committer.clone())) as *const Committer as u64,
-          Ordering::Release,
+            Box::into_raw(Box::new(self.committer.clone())) as *const Committer as u64,
+            Ordering::Release,
         );
         assert!(num_workers <= BankingStage::max_num_workers());
         let num_workers = num_workers.get();
@@ -885,7 +887,7 @@ pub(crate) fn update_bank_forks_and_poh_recorder_for_new_tpu_bank(
     // if set_bank_res.is_err() {
     //     warn!("Failed to set poh bank, poh service is disconnected");
     // }
-    // tpu_bank.unpause_new_block_production_scheduler();    
+    // tpu_bank.unpause_new_block_production_scheduler();
     poh_recorder.write().unwrap().set_bank(tpu_bank);
 }
 
