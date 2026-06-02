@@ -1,5 +1,10 @@
 [workspace]
 members = [
+    # Allnodes
+    "allnodes/client",
+    "allnodes/protos/allnodes-service-protos",
+    "allnodes/solana",
+
     "account-decoder",
     "account-decoder-client-types",
     "accounts-cluster-bench",
@@ -179,6 +184,13 @@ manual_let_else = "deny"
 used_underscore_binding = "deny"
 
 [workspace.dependencies]
+# Allnodes
+allnodes-client = { path = "allnodes/client" }
+allnodes-service-protos = { path = "allnodes/protos/allnodes-service-protos" }
+allnodes-solana = { path = "allnodes/solana" }
+lazy_static = "1.5.0"
+solana-define-syscall = "5.0.0"
+
 Inflector = "0.11.4"
 agave-banking-stage-ingress-types = { path = "banking-stage-ingress-types", version = "=4.1.0-beta.1", features = ["agave-unstable-api"] }
 agave-bls-cert-verify = { path = "bls-cert-verify", version = "=4.1.0-beta.1", features = ["agave-unstable-api"] }
@@ -418,7 +430,7 @@ solana-genesis-utils = { path = "genesis-utils", version = "=4.1.0-beta.1", feat
 solana-geyser-plugin-manager = { path = "geyser-plugin-manager", version = "=4.1.0-beta.1", features = ["agave-unstable-api"] }
 solana-gossip = { path = "gossip", version = "=4.1.0-beta.1", features = ["agave-unstable-api"] }
 solana-hard-forks = "3.1.0"
-solana-hash = "4.3.0"
+solana-hash = { version = "4.3.0", features = ["borsh"] }
 solana-hash-512 = "1.1.0"
 solana-inflation = "3.1.0"
 solana-instruction = "3.4.0"
@@ -621,5 +633,9 @@ lto = "fat"
 codegen-units = 1
 
 [patch.crates-io]
+# Allnodes sdk customizations
+solana-file-download = { path = "allnodes/sdk/file-download" }
+solana-sha256-hasher = { path = "allnodes/sdk/sha256-hasher" }
+
 # for details, see https://github.com/anza-xyz/crossbeam/commit/fd279d707025f0e60951e429bf778b4813d1b6bf
 crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d707025f0e60951e429bf778b4813d1b6bf" }
