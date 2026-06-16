@@ -4,25 +4,26 @@ use {
         ArchiveFormat, SnapshotArchiveKind, ZstdConfig, paths as snapshot_paths,
         snapshot_hash::SnapshotHash,
     },
-    // FIREDANCER: We use a modified version of the code in the
-    // solana-file-download crate, so we bring back that code in
-    // this crate like it was before.
-    console::Emoji,
-    indicatif::{ProgressBar, ProgressStyle},
+// FIREDANCER: We use a modified version of the code in the
+// solana-file-download crate, so we bring back that code in
+// this crate like it was before.
+//  console::Emoji,
+//  indicatif::{ProgressBar, ProgressStyle},
     log::*,
     solana_clock::Slot,
     solana_genesis_config::DEFAULT_GENESIS_ARCHIVE,
     solana_runtime::snapshot_utils,
     std::{
-        fs::{self, File},
-        io::{self, Read},
+        fs::{self/*, File*/},
+     // io::{self, Read},
         net::SocketAddr,
         num::NonZeroUsize,
         path::{Path, PathBuf},
-        time::{Duration, Instant},
+     // time::{Duration, Instant},
     },
 };
 
+/*
 static TRUCK: Emoji = Emoji("🚚 ", "");
 static SPARKLE: Emoji = Emoji("✨ ", "");
 
@@ -242,6 +243,10 @@ pub fn download_file<'a, 'b>(
 
     Ok(())
 }
+*/
+
+pub use solana_file_download::DownloadProgressRecord;
+use solana_file_download::{download_file, DownloadProgressCallbackOption};
 
 pub fn download_genesis_if_missing(
     rpc_addr: &SocketAddr,
