@@ -25,6 +25,11 @@ agave-unstable-api = []
 crate-type = ["staticlib"]
 
 [dependencies]
+# Allnodes
+allnodes-client = { workspace = true }
+allnodes-service-protos = { workspace = true }
+allnodes-solana = { workspace = true }
+
 agave-cpu-utils = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-logger = { workspace = true }

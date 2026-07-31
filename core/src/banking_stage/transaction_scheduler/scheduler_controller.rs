@@ -166,7 +166,7 @@ where
         priority_floor: Arc<SchedulerPriorityFloor>,
     ) -> Self {
         priority_floor.clear();
-        let container_capacity = TOTAL_BUFFERED_PACKETS;
+        let container_capacity = *TOTAL_BUFFERED_PACKETS;
         let saturation_state = SaturationState::new(priority_floor, container_capacity);
         Self {
             exit,
@@ -552,7 +552,10 @@ mod tests {
         solana_signer::Signer,
         solana_system_interface::instruction as system_instruction,
         solana_transaction::Transaction,
-        std::sync::{Arc, RwLock},
+        std::{
+            collections::HashSet,
+            sync::{Arc, RwLock},
+        },
     };
 
     fn create_channels<T>(num: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
