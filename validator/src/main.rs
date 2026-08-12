@@ -110,6 +110,12 @@ where
         ("contact-info", Some(subcommand_matches)) => {
             commands::contact_info::execute(subcommand_matches, &ledger_path)
         }
+        ("enable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, true)
+        }
+        ("disable-experimental-feature", _) => {
+            commands::allnodes::enable_experimental_feature_execute(&ledger_path, false)
+        }
         ("exit", Some(subcommand_matches)) => {
             commands::exit::execute(subcommand_matches, &ledger_path)
         }
