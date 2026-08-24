@@ -143,7 +143,8 @@ pub fn execute(
     } else {
         None
     };
-    let use_progress_bar = log_config.is_none();
+    let use_progress_bar =
+        log_config.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout());
     // FIREDANCER: Redirect logging to Firedancer
     // agave_logger::initialize_logging(logfile);
     let _ = logfile.clone();
@@ -355,6 +356,34 @@ pub fn execute(
 
     let exit = Arc::new(AtomicBool::new(false));
 
+    info!(
+        "Bound all network sockets as follows:\n{}",
+        allnodes_solana::format_sockets(&node.sockets)
+    );
+
+    // TODO: Once entrypoints are updated to return shred-version, this should
+    // abort if it fails to obtain a shred-version, so that nodes always join
+    // gossip with a valid shred-version. The code to adopt entrypoint shred
+    // version can then be deleted from gossip and get_rpc_node above.
+    let expected_shred_version = value_t!(matches, "expected_shred_version", u16)
+        .ok()
+        .or_else(|| get_cluster_shred_version(&entrypoint_addrs, bind_addresses.active()));
+
+    let identity_path = match matches.value_of("identity") {
+        None | Some("ASK") => None,
+        Some(path) => PathBuf::from_str(path).ok(),
+    };
+    let mut poh_pinned_cpu_core = value_of(matches, "poh_pinned_cpu_core");
+    let mut xdp_recommended_vcore_id = 0;
+    solana_core::allnodes::init(
+        &run_args.ledger_path,
+        identity_path.as_ref(),
+        expected_shred_version,
+        advertised_ip,
+        &mut poh_pinned_cpu_core,
+        &mut xdp_recommended_vcore_id,
+    );
+
     #[cfg(not(target_os = "linux"))]
     let _ = config;
 
@@ -535,22 +564,6 @@ pub fn execute(
 
     let ledger_path = run_args.ledger_path;
 
-    let max_ledger_shreds = if matches.is_present("limit_ledger_size") {
-        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
-            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
-            None => DEFAULT_MAX_LEDGER_SHREDS,
-        };
-        if limit_ledger_size < DEFAULT_MIN_MAX_LEDGER_SHREDS {
-            Err(format!(
-                "The provided --limit-ledger-size value was too small, the minimum value is \
-                 {DEFAULT_MIN_MAX_LEDGER_SHREDS}"
-            ))?;
-        }
-        Some(limit_ledger_size)
-    } else {
-        None
-    };
-
     let debug_keys: Option<Arc<HashSet<_>>> = if matches.is_present("debug_key") {
         Some(Arc::new(
             values_t_or_exit!(matches, "debug_key", Pubkey)
@@ -637,13 +650,6 @@ pub fn execute(
     } else {
         AccountShrinkThreshold::IndividualStore { shrink_ratio }
     };
-    // TODO: Once entrypoints are updated to return shred-version, this should
-    // abort if it fails to obtain a shred-version, so that nodes always join
-    // gossip with a valid shred-version. The code to adopt entrypoint shred
-    // version can then be deleted from gossip and get_rpc_node above.
-    let expected_shred_version = value_t!(matches, "expected_shred_version", u16)
-        .ok()
-        .or_else(|| get_cluster_shred_version(&entrypoint_addrs, bind_addresses.active()));
 
     let tower_path = value_t!(matches, "tower", PathBuf)
         .ok()
@@ -880,7 +886,7 @@ pub fn execute(
         repair_whitelist,
         repair_handler_type: RepairHandlerType::default(),
         gossip_validators,
-        max_ledger_shreds,
+        max_ledger_shreds: None,
         blockstore_options: run_args.blockstore_options,
         run_verification: !matches.is_present("skip_startup_ledger_verification"),
         debug_keys,
@@ -966,6 +972,24 @@ pub fn execute(
             "snapshot_packager_niceness_adj",
             i8
         ),
+
+        // Allnodes config
+        identity_path: match matches.value_of("identity") {
+            None | Some("ASK") => None,
+            Some(path) => PathBuf::from_str(path).ok(),
+        },
+        use_mostly_confirmed_threshold: !matches.is_present("disable_mostly_confirmed_threshold"),
+        mostly_confirmed_threshold_config_path: value_t!(
+            matches,
+            "mostly_confirmed_threshold_config",
+            PathBuf
+        )
+        .ok(),
+        voting_patch_flags: None,
+        voting_patch_flags2: solana_core::allnodes::init_flags2(
+            matches.is_present("experimental_feature"),
+        ),
+        poh_message: None,
     };
     validator_config
         .block_production_method
@@ -1018,6 +1042,7 @@ pub fn execute(
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
+            flags2: validator_config.voting_patch_flags2.clone(),
             rpc_addr: validator_config.rpc_addrs.map(|(rpc_addr, _)| rpc_addr),
             start_time: std::time::SystemTime::now(),
             validator_exit: validator_config.validator_exit.clone(),
@@ -1064,6 +1089,11 @@ pub fn execute(
         }
         unsafe { fd_ext_shred_set_shred_version(shred_version as u64) };
     }
+
+    info!(
+        "Bound all network sockets as follows:\n{}",
+        allnodes_solana::format_sockets(&node.sockets)
+    );
 
     if restricted_repair_only_mode {
         // When in --restricted_repair_only_mode is enabled only the gossip and repair ports
@@ -1130,6 +1160,20 @@ pub fn execute(
             maximum_snapshot_download_abort,
             run_args.socket_addr_space,
         );
+    }
+
+    if matches.is_present("limit_ledger_size") {
+        let limit_ledger_size = match matches.value_of("limit_ledger_size") {
+            Some(_) => value_t_or_exit!(matches, "limit_ledger_size", u64),
+            None => *DEFAULT_MAX_LEDGER_SHREDS,
+        };
+        if limit_ledger_size < *DEFAULT_MIN_MAX_LEDGER_SHREDS {
+            Err(format!(
+                "The provided --limit-ledger-size value was too small, the minimum value is {}",
+                *DEFAULT_MIN_MAX_LEDGER_SHREDS,
+            ))?;
+        }
+        validator_config.max_ledger_shreds = Some(limit_ledger_size);
     }
 
     if operation == Operation::Initialize {
@@ -1302,8 +1346,32 @@ fn new_snapshot_config(
     account_paths: &[PathBuf],
     incremental_snapshot_fetch: bool,
 ) -> Result<SnapshotConfig, Box<dyn std::error::Error>> {
+    let mut no_snapshots = if matches.occurrences_of("no_snapshots") == 0 {
+        None
+    } else {
+        matches
+            .value_of("no_snapshots")
+            .map(|value| value == "true")
+    };
+    if matches.occurrences_of("snapshot_interval_slots") > 0
+        || matches.occurrences_of("full_snapshot_interval_slots") > 0
+    {
+        match no_snapshots {
+            Some(true) => {
+                return Err(Box::new(clap::Error::with_description(
+                    "The --no-snapshots argument is not compatible with --snapshot-interval-slots \
+                     or --full-snapshot-interval-slots",
+                    clap::ErrorKind::ArgumentConflict,
+                )));
+            }
+            None | Some(false) => {
+                no_snapshots = Some(false);
+            }
+        }
+    }
+
     let (full_snapshot_archive_interval, incremental_snapshot_archive_interval) =
-        if matches.is_present("no_snapshots") {
+        if no_snapshots.unwrap_or(true) {
             // snapshots are disabled
             (SnapshotInterval::Disabled, SnapshotInterval::Disabled)
         } else {
